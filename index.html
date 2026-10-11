@@ -96,6 +96,16 @@
           <!-- built by JS -->
         </div>
         <div class="pattern-count vt" id="pattern-count"></div>
+        <div id="anim-controls" class="anim-controls" style="display:none">
+          <div class="anim-control-group">
+            <div class="pixel-label">// ANIM SPEED &gt; <span id="anim-speed-val" class="accent">1.0</span>x</div>
+            <input type="range" id="anim-speed-slider" class="pixel-slider" min="2" max="40" value="10">
+          </div>
+          <div class="anim-control-group">
+            <div class="pixel-label">// TARGET FPS &gt; <span id="anim-fps-val" class="accent">30</span> FPS</div>
+            <input type="range" id="anim-fps-slider" class="pixel-slider" min="5" max="60" value="30">
+          </div>
+        </div>
         <button id="audio-viz-btn" class="pixel-btn disabled-btn" disabled>
           [ MIC/AUDIO VISUALIZER: OFF ] [BROKEN]
         </button>

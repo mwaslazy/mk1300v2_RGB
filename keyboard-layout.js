@@ -1,16 +1,27 @@
 /**
  * ANT Esports MK1300 V2 — 60% keyboard layout
  * 5 rows, ~15u wide. No F-row, no numpad, no nav cluster.
- * Esc is top-left (index 0). Up arrow is in the shift row.
+ *
+ * Two hardware revisions exist. They share the same physical 61-key layout,
+ * but the firmware uses a DIFFERENT LED index map and custom-light mode:
+ *
+ *   REV 1   (original)  — LED index = row*21 + col (full-size matrix, Esc=21), UserLight mode 16
+ *   REV 2.0 (revised)   — LED index = row*15 + col (compact matrix,  Esc=0),  UserLight mode 20
+ *                         Vendor profile "61 Key" (VID 0x36AE / PID 0xFEAD)
+ *
+ * Each key has:
+ *   index — stable logical key ID (= REV 1 LED index). Effects/patterns reference this,
+ *           so every pattern works unchanged on every revision.
+ *   led   — the hardware LED index for the ACTIVE revision. Only used when writing to HW.
  */
 
 // Row 0: Esc, 1-0, -, =, Backspace
 // Row 1: Tab, Q-P, [, ], backslash
 // Row 2: Caps, A-L, ;, ', Enter
-// Row 3: LShift, Z-?, Up, RShift
+// Row 3: LShift, Z-?, RShift
 // Row 4: Ctrl, Win, Alt, Space, Alt, Menu, Ctrl, Fn
 
-export const KEYBOARD_LAYOUT = [
+const BASE_LAYOUT = [
   // Row 0 — number row (y=0)
   // NOTE: Esc uses index 21 (the ~ slot in the firmware matrix).
   // Index 0 is reserved for a non-existent function-row key on the full keyboard.
@@ -85,7 +96,92 @@ export const KEYBOARD_LAYOUT = [
   { index:118,x:13.5, y:4, w:1.5,  h:1, name:"Fn"   },
 ];
 
-export const MAX_KEY_INDEX = Math.max(...KEYBOARD_LAYOUT.map(k => k.index));
-export const KEY_COUNT = MAX_KEY_INDEX + 1;
+// ── REV 2.0 LED map (logical index → hardware LED) ──────────────────────────
+// Source: vendor web-driver profile "61 Key" (36AE:FEAD), compact 15-wide matrix.
+// The revised firmware drops the F-row and uses row*15 + col.
+//   Row 0: Esc..Bksp  → 0..13
+//   Row 1: Tab..\     → 15..28
+//   Row 2: Caps..'    → 30..41, Enter → 43
+//   Row 3: Shift → 45, Z..? → 47..56, RShift → 58
+//   Row 4: Ctrl 60, Win 61, Alt 62, Space 66, then the 4 right-side keys 70..73
+//          (LEDs are positional — 70..73 are the 5th..8th physical keys of the bottom row)
+const REV2_LED = {};
+// Rows 0-3: same column structure as REV 1, just a different row stride/origin.
+for (const k of BASE_LAYOUT) {
+  if (k.index >= 21 && k.index <= 97) {
+    const row = Math.floor(k.index / 21) - 1;   // REV 1 row 1..4 → 0..3
+    const col = k.index % 21;
+    REV2_LED[k.index] = row * 15 + col;
+  }
+}
+// Bottom row (columns are NOT a simple offset here)
+Object.assign(REV2_LED, {
+  105: 60,  // Ctrl
+  106: 61,  // Win
+  107: 62,  // Alt
+  111: 66,  // Space
+  115: 70,  // R-Alt
+  116: 71,  // 6th key
+  117: 72,  // 7th key
+  118: 73,  // 8th key (bottom-right corner)
+});
+
+// REV 2.0 bottom-right: four equal 1.25u keys (Alt, Menu, Ctrl, Fn on ANT Esports keycaps)
+const REV2_GEOMETRY = {
+  115: { x:10,    w:1.25 },
+  116: { x:11.25, w:1.25 },
+  117: { x:12.5,  w:1.25 },
+  118: { x:13.75, w:1.25 },
+};
+
+// ── Revision profiles ────────────────────────────────────────────────────────
+export const LAYOUT_PROFILES = {
+  rev1: {
+    id: 'rev1',
+    label: 'REV 1 (original)',
+    userLightMode: 16,
+    productIds: [0xFE9C, 0xFE61, 0xFEBC],
+    keys: BASE_LAYOUT.map(k => ({ ...k, led: k.index })),
+  },
+  rev2: {
+    id: 'rev2',
+    label: 'REV 2.0 (revised)',
+    userLightMode: 20,
+    productIds: [0xFEAD, 0xFE62],
+    keys: BASE_LAYOUT.map(k => ({ ...k, ...(REV2_GEOMETRY[k.index] || {}), led: REV2_LED[k.index] })),
+  },
+};
+
+// Sanity check: every key must have a unique hardware LED in every profile
+for (const p of Object.values(LAYOUT_PROFILES)) {
+  const seen = new Set();
+  for (const k of p.keys) {
+    if (k.led === undefined || seen.has(k.led)) {
+      console.error(`[layout] ${p.id}: bad/duplicate LED for key "${k.name}" (${k.index})`);
+    }
+    seen.add(k.led);
+  }
+}
+
+// ── Active layout (ES module live bindings — importers always see current values) ──
+export let ACTIVE_PROFILE  = LAYOUT_PROFILES.rev1;
+export let KEYBOARD_LAYOUT = ACTIVE_PROFILE.keys;
+export let MAX_KEY_INDEX   = Math.max(...KEYBOARD_LAYOUT.map(k => k.led));
+export let KEY_COUNT       = MAX_KEY_INDEX + 1;   // number of LED slots to send to HW
 export const KB_WIDTH  = 15;   // ~15 standard key-widths
 export const KB_HEIGHT = 5;    // 5 rows
+
+/** Switch active hardware revision. Returns the new profile. */
+export function setActiveLayout(id) {
+  const p = LAYOUT_PROFILES[id] || LAYOUT_PROFILES.rev1;
+  ACTIVE_PROFILE  = p;
+  KEYBOARD_LAYOUT = p.keys;
+  MAX_KEY_INDEX   = Math.max(...p.keys.map(k => k.led));
+  KEY_COUNT       = MAX_KEY_INDEX + 1;
+  return p;
+}
+
+/** Find the revision profile matching a USB product ID (or null if unknown). */
+export function profileForProductId(pid) {
+  return Object.values(LAYOUT_PROFILES).find(p => p.productIds.includes(pid)) || null;
+}

@@ -343,6 +343,8 @@ body {
 .keyboard {
   position: relative;
   background: #050505;
+  /* Scope repaints to the keyboard container */
+  contain: layout;
 }
 .key {
   position: absolute;
@@ -352,7 +354,10 @@ body {
   color: rgba(255,255,255,0.4);
   border: 1px solid rgba(255,255,255,0.1);
   background: #111;
-  transition: background-color 0.08s, box-shadow 0.08s;
+  /* No transition – JS animation updates faster than CSS interpolation can keep
+     up, causing the transition to "fight" the rAF loop and produce flicker.
+     Smoothness now comes from the rAF cadence + dirty-checking in applyViz. */
+  will-change: background-color, box-shadow;
   user-select: none;
   overflow: hidden;
 }
@@ -1117,4 +1122,23 @@ body {
   padding: 2px 4px 0;
   letter-spacing: 0.5px;
 }
+
+/* ── Animated Effects Controls ── */
+.anim-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 6px 12px 10px;
+  padding: 12px 16px;
+  background: var(--panel);
+  border: 2px solid rgba(0, 245, 255, 0.3);
+  box-shadow: 0 0 12px rgba(0, 245, 255, 0.15);
+}
+.anim-control-group {
+  flex: 1 1 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 

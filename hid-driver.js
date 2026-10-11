@@ -260,18 +260,21 @@ class HIDDriver {
 
   async setAllKeyColors(colorArray, keyCount) {
     const totalBytes = keyCount * 3;
-    const chunkSize = 56;
+    // Must be a multiple of 3 (18 keys * 3 = 54 bytes) so key RGB triplets are never
+    // split across packets and offsets remain 3-byte aligned.
+    // Previously chunkSize = 56 split E (byte 54-56), J (byte 111-113), and misaligned R and /,
+    // causing them to flash the partial/old color while waiting between packet transmissions.
+    const chunkSize = 54;
     const chunks = Math.ceil(totalBytes / chunkSize);
 
     for (let i = 0; i < chunks; i++) {
       const offset = chunkSize * i;
       const remaining = totalBytes - offset;
       const thisChunk = Math.min(chunkSize, remaining);
-      const isLast = i === chunks - 1;
 
       const packet = new Array(63).fill(0);
       packet[0] = 18;
-      packet[1] = isLast && remaining % chunkSize > 0 ? (remaining % chunkSize) + 3 : chunkSize + 3;
+      packet[1] = thisChunk + 3;
       packet[2] = offset & 0xFF;
       packet[3] = (offset >> 8) & 0xFF;
 

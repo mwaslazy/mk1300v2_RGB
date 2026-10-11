@@ -1,9 +1,13 @@
 import { HIDDriver } from './hid-driver.js';
-import { KEYBOARD_LAYOUT, KEY_COUNT, KB_WIDTH, KB_HEIGHT } from './keyboard-layout.js';
+import {
+  KEYBOARD_LAYOUT, KEY_COUNT, KB_WIDTH, KB_HEIGHT,
+  ACTIVE_PROFILE, setActiveLayout, profileForProductId,
+} from './keyboard-layout.js';
 import { PATTERNS } from './effects.js';
 import { EXTRA_PATTERNS } from './extra-effects.js';
+import { ANIMATED_PATTERNS } from './animated-effects.js';
 
-const ALL_PATTERNS = [...PATTERNS, ...EXTRA_PATTERNS];
+const ALL_PATTERNS = [...PATTERNS, ...EXTRA_PATTERNS, ...ANIMATED_PATTERNS];
 
 
 const driver = new HIDDriver();
@@ -18,6 +22,7 @@ let userLightMode  = 16;
 // ── Categories ───────────────────────────────────────────────────────────────
 const CATEGORIES = [
   { id: 'all',       label: 'ALL',        icon: '◈' },
+  { id: 'animated',  label: 'ANIMATED',   icon: '💫' },
   { id: 'contrasty', label: 'CONTRASTY',  icon: '⚡' },
   { id: 'gradient',  label: 'GRADIENT',   icon: '🌈' },
   { id: 'neon',      label: 'NEON/CYBER', icon: '💜' },
@@ -31,6 +36,9 @@ const CATEGORIES = [
 
 // Map each pattern id → category id
 const PATTERN_CAT = {
+  // Animated
+  rgbwave:'animated', matrixrain:'animated', breathing:'animated', pulse:'animated', heartbeat:'animated',
+  
   sunset:'gradient', northern:'gradient', ocean:'gradient', vaporwave:'gradient',
   forest:'gradient', synthwave:'gradient', caribbean:'gradient', golden:'gradient',
   frost:'gradient', aurora:'gradient', coral:'gradient', frozen:'gradient',
@@ -81,7 +89,11 @@ const PATTERN_CAT = {
   deepcherry:'pastel',      elecfence:'contrasty',
 };
 
-function catOf(id) { return PATTERN_CAT[id] || 'gradient'; }
+function catOf(id) { 
+  const p = ALL_PATTERNS.find(x => x.id === id);
+  if (p && p.animated) return 'animated';
+  return PATTERN_CAT[id] || 'gradient'; 
+}
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const connectBtn    = document.getElementById('connect-btn');
@@ -96,6 +108,12 @@ const bVal          = document.getElementById('brightness-val');
 const patternName   = document.getElementById('pattern-name');
 const catStrip      = document.getElementById('cat-strip');
 const patternCount  = document.getElementById('pattern-count');
+
+const animControls    = document.getElementById('anim-controls');
+const animSpeedSlider = document.getElementById('anim-speed-slider');
+const animSpeedVal    = document.getElementById('anim-speed-val');
+const animFpsSlider   = document.getElementById('anim-fps-slider');
+const animFpsVal      = document.getElementById('anim-fps-val');
 
 const userLightToggle = document.getElementById('userlight-toggle');
 
@@ -125,6 +143,12 @@ function log(msg) {
 driver.onLog = log;
 
 // ── Keyboard viz ─────────────────────────────────────────────────────────────
+// Cached flat array of key DOM elements – rebuilt in buildKeyboard().
+// Indexed 1-for-1 with KEYBOARD_LAYOUT so applyViz needs no querySelector.
+let keyEls = [];
+// Previous color snapshot for dirty-checking (avoids redundant style writes)
+let prevColors = [];
+
 function buildKeyboard() {
   const frame   = kbContainer.closest('.crt-frame');
   // 6px padding each side inside the frame = 12px total
@@ -133,6 +157,8 @@ function buildKeyboard() {
   kbContainer.style.width  = `${KB_WIDTH  * scale}px`;
   kbContainer.style.height = `${KB_HEIGHT * scale}px`;
   kbContainer.innerHTML = '';
+  keyEls = [];
+  prevColors = [];
   KEYBOARD_LAYOUT.forEach(key => {
     const el = document.createElement('div');
     el.className = 'key';
@@ -143,31 +169,115 @@ function buildKeyboard() {
     el.style.height = `${key.h * scale - 2}px`;
     el.textContent  = key.name;
     kbContainer.appendChild(el);
+    keyEls.push(el);
+    prevColors.push({ r: -1, g: -1, b: -1 }); // force first-frame write
   });
   if (currentColors.length) applyViz(currentColors);
 }
 
 function applyViz(colors) {
-  KEYBOARD_LAYOUT.forEach((key, i) => {
-    const el = kbContainer.querySelector(`[data-index="${key.index}"]`);
-    if (!el || !colors[i]) return;
-    const {r,g,b} = colors[i];
+  for (let i = 0; i < keyEls.length; i++) {
+    const c = colors[i];
+    if (!c) continue;
+    const { r, g, b } = c;
+    const prev = prevColors[i];
+    // Skip DOM write if color hasn't changed – eliminates the main flicker source
+    if (r === prev.r && g === prev.g && b === prev.b) continue;
+    prev.r = r; prev.g = g; prev.b = b;
+
+    const el = keyEls[i];
     el.style.backgroundColor = `rgb(${r},${g},${b})`;
-    const bright = Math.max(r,g,b);
-    el.style.boxShadow = bright > 20
-      ? `0 0 ${Math.round(bright/14)}px rgba(${r},${g},${b},0.7)`
-      : 'none';
+
+    // Use a stable rgba() box-shadow value (never toggled to 'none') so the
+    // compositor keeps the layer alive and avoids the on/off flicker.
+    const bright = Math.max(r, g, b);
+    if (bright > 20) {
+      const radius = Math.round(bright / 14);
+      el.style.boxShadow = `0 0 ${radius}px rgba(${r},${g},${b},0.65)`;
+    } else {
+      // Invisible shadow instead of 'none' – keeps layer promoted, no repaint
+      el.style.boxShadow = `0 0 1px rgba(0,0,0,0)`;
+    }
+  }
+}
+
+// ── Hardware frame ────────────────────────────────────────────────────────────
+// Converts per-layout-key colors into the flat RGB buffer the firmware expects,
+// using the ACTIVE revision's LED map (key.led), not the logical key index.
+function buildHWFrame(colors) {
+  const flat = new Array(KEY_COUNT * 3).fill(0);
+  KEYBOARD_LAYOUT.forEach((key, i) => {
+    const c = colors[i];
+    if (!c) return;
+    flat[key.led * 3]     = c.r;
+    flat[key.led * 3 + 1] = c.g;
+    flat[key.led * 3 + 2] = c.b;
   });
+  return flat;
 }
 
 // ── Pattern logic ─────────────────────────────────────────────────────────────
-function computeColors(p) {
+function computeColors(p, time = 0) {
   const br = parseInt(bSlider.value) / 100;
-  return p.fn(KEYBOARD_LAYOUT).map(c => ({
+  return p.fn(KEYBOARD_LAYOUT, time).map(c => ({
     r: Math.round(c.r * br),
     g: Math.round(c.g * br),
     b: Math.round(c.b * br),
   }));
+}
+
+let patternAnimationActive = false;
+let patternAnimationFrame = null;
+let lastFrameTime = 0;
+
+function updateAnimControlsVisibility() {
+  if (!animControls) return;
+  const isAnim = currentTab === 'software' && (activeCat === 'animated' || (currentPattern && currentPattern.animated));
+  animControls.style.display = isAnim ? 'flex' : 'none';
+}
+
+if (animSpeedSlider) {
+  animSpeedSlider.addEventListener('input', () => {
+    if (animSpeedVal) animSpeedVal.textContent = (animSpeedSlider.value / 10).toFixed(1);
+    saveSettings();
+  });
+}
+if (animFpsSlider) {
+  animFpsSlider.addEventListener('input', () => {
+    if (animFpsVal) animFpsVal.textContent = animFpsSlider.value;
+    saveSettings();
+  });
+}
+
+function renderPatternAnimation(timestamp) {
+  if (!patternAnimationActive) return;
+  patternAnimationFrame = requestAnimationFrame(renderPatternAnimation);
+
+  if (currentTab !== 'software' || vizActive) return;
+
+  const targetFps = animFpsSlider ? (parseInt(animFpsSlider.value, 10) || 30) : 30;
+  const frameInterval = 1000 / targetFps;
+
+  // Clamp lastFrameTime so a tab-hide / sleep won't fire a burst of frames
+  if (!lastFrameTime) lastFrameTime = timestamp;
+  const delta = timestamp - lastFrameTime;
+  if (delta < frameInterval) return;
+  // Advance by exactly one interval (prevents lag spiral at low FPS)
+  lastFrameTime = timestamp - (delta % frameInterval);
+
+  const speedMult = animSpeedSlider ? ((parseInt(animSpeedSlider.value, 10) || 10) / 10) : 1.0;
+  const time = (performance.now() / 1000) * speedMult;
+  currentColors = computeColors(currentPattern, time);
+  applyViz(currentColors);
+
+  if (!driver.connected || sendPending) return;
+
+  sendPending = true;
+  driver.setAllKeyColors(buildHWFrame(currentColors), KEY_COUNT).then(() => {
+    sendPending = false;
+  }).catch(() => {
+    sendPending = false;
+  });
 }
 
 async function applyPattern(p, sendToHW = true) {
@@ -176,25 +286,34 @@ async function applyPattern(p, sendToHW = true) {
   document.querySelectorAll('.effect-card').forEach(c =>
     c.classList.toggle('active', c.dataset.id === p.id)
   );
-  currentColors = computeColors(p);
-  applyViz(currentColors);
-  if (!sendToHW || !driver.connected || currentTab !== 'software') return;
-  if (sendPending) return;
-  sendPending = true;
-  await new Promise(r => setTimeout(r, 40));
-  sendPending = false;
-  try {
-    const flat = new Array(KEY_COUNT * 3).fill(0);
-    KEYBOARD_LAYOUT.forEach((key, i) => {
-      if (currentColors[i]) {
-        flat[key.index * 3]     = currentColors[i].r;
-        flat[key.index * 3 + 1] = currentColors[i].g;
-        flat[key.index * 3 + 2] = currentColors[i].b;
-      }
-    });
-    await driver.setAllKeyColors(flat, KEY_COUNT);
-    if (!vizActive) log(`OK: "${p.name}" applied`);
-  } catch(e) { if (!vizActive) log(`ERR: ${e.message}`); }
+
+  patternAnimationActive = false;
+  cancelAnimationFrame(patternAnimationFrame);
+
+  // Invalidate dirty-check cache so the new pattern's first frame draws fully
+  prevColors.forEach(c => { c.r = -1; c.g = -1; c.b = -1; });
+
+  updateAnimControlsVisibility();
+
+  if (p.animated) {
+    patternAnimationActive = true;
+    if (!vizActive) {
+      lastFrameTime = 0;
+      patternAnimationFrame = requestAnimationFrame(renderPatternAnimation);
+    }
+  } else {
+    currentColors = computeColors(p, 0);
+    applyViz(currentColors);
+    if (!sendToHW || !driver.connected || currentTab !== 'software' || vizActive) return;
+    if (sendPending) return;
+    sendPending = true;
+    await new Promise(r => setTimeout(r, 40));
+    sendPending = false;
+    try {
+      await driver.setAllKeyColors(buildHWFrame(currentColors), KEY_COUNT);
+      if (!vizActive) log(`OK: "${p.name}" applied`);
+    } catch(e) { if (!vizActive) log(`ERR: ${e.message}`); }
+  }
 }
 
 // ── Category tabs ─────────────────────────────────────────────────────────────
@@ -209,6 +328,7 @@ function buildCatTabs() {
       activeCat = cat.id;
       buildCatTabs();
       buildGrid();
+      updateAnimControlsVisibility();
       saveSettings();
     });
     catStrip.appendChild(btn);
@@ -337,16 +457,7 @@ function renderAudioViz() {
   applyViz(currentColors);
   
   sendPending = true;
-  const flat = new Array(KEY_COUNT * 3).fill(0);
-  KEYBOARD_LAYOUT.forEach((key, i) => {
-    if (currentColors[i]) {
-      flat[key.index * 3]     = currentColors[i].r;
-      flat[key.index * 3 + 1] = currentColors[i].g;
-      flat[key.index * 3 + 2] = currentColors[i].b;
-    }
-  });
-  
-  driver.setAllKeyColors(flat, KEY_COUNT).then(() => {
+  driver.setAllKeyColors(buildHWFrame(currentColors), KEY_COUNT).then(() => {
     sendPending = false;
   }).catch(() => {
     sendPending = false;
@@ -363,7 +474,20 @@ async function connectDevice() {
     const info = await driver.connect();
     statusDot.className = 'dot dot-on';
     statusText.textContent = 'ONLINE';
-    deviceInfo.textContent = `${info.productName || 'KB'} | VID:${info.vendorId.toString(16).toUpperCase()}`;
+    const pidHex = info.productId.toString(16).toUpperCase().padStart(4, '0');
+
+    // Auto-detect hardware revision from the USB product ID
+    const detected = profileForProductId(info.productId);
+    if (detected && detected.id !== ACTIVE_PROFILE.id) {
+      applyRevision(detected.id);
+      saveSettings();
+      log(`AUTO: PID ${pidHex} → ${detected.label} (LED map + mode ${detected.userLightMode})`);
+    } else if (detected) {
+      log(`PID ${pidHex} → ${detected.label}`);
+    } else {
+      log(`PID ${pidHex} unknown — using ${ACTIVE_PROFILE.label}. Toggle REV 2.0 if keys light up wrong.`);
+    }
+    deviceInfo.textContent = `${info.productName || 'KB'} | VID:${info.vendorId.toString(16).toUpperCase()} PID:${pidHex} | ${ACTIVE_PROFILE.label}`;
     connectBtn.textContent = '[ CONNECTED ]';
     audioVizBtn.style.display = 'block';
     try {
@@ -395,14 +519,32 @@ async function connectDevice() {
 connectBtn.addEventListener('click', connectDevice);
 audioVizBtn.addEventListener('click', toggleAudioViz);
 
-userLightToggle.addEventListener('change', async () => {
-  userLightMode = userLightToggle.checked ? 20 : 16;
-  
+// ── Hardware revision switching ──────────────────────────────────────────────
+// Swaps the LED index map, keyboard geometry and UserLight mode together.
+function applyRevision(revId) {
+  const p = setActiveLayout(revId);
+  userLightMode = p.userLightMode;
+  userLightToggle.checked = p.id === 'rev2';
+
   // Update the visible label on the UserLight option in the HW dropdown (cosmetic only)
   const opt = document.getElementById('hw-mode-userlight');
   if (opt) {
     opt.textContent = `${userLightMode}: UserLight`;
   }
+
+  // Rebuild visuals for the new geometry
+  currentColors = computeColors(currentPattern);
+  buildKeyboard();
+  if (currentTab === 'custom') {
+    buildCustomKeyboard();
+    refreshCustomKeyboard();
+  }
+  return p;
+}
+
+userLightToggle.addEventListener('change', async () => {
+  const p = applyRevision(userLightToggle.checked ? 'rev2' : 'rev1');
+  log(`Layout: ${p.label} (UserLight mode ${p.userLightMode})`);
   
   saveSettings();
   
@@ -513,6 +655,7 @@ function switchTab(tab) {
   panelHardware.style.display = tab === 'hardware' ? 'block' : 'none';
   panelCustom.style.display   = tab === 'custom'   ? 'block' : 'none';
   
+  updateAnimControlsVisibility();
   saveSettings();
 
   if (driver.connected) {
@@ -709,15 +852,7 @@ async function pushCustomToHW() {
   sendPending = true;
   try {
     const brightColors = getCustomColorsWithBrightness();
-    const flat = new Array(KEY_COUNT * 3).fill(0);
-    KEYBOARD_LAYOUT.forEach((key, i) => {
-      if (brightColors[i]) {
-        flat[key.index * 3]     = brightColors[i].r;
-        flat[key.index * 3 + 1] = brightColors[i].g;
-        flat[key.index * 3 + 2] = brightColors[i].b;
-      }
-    });
-    await driver.setAllKeyColors(flat, KEY_COUNT);
+    await driver.setAllKeyColors(buildHWFrame(brightColors), KEY_COUNT);
     log('OK: Custom preset pushed');
   } catch(e) {
     log('ERR: ' + e.message);
@@ -1228,6 +1363,8 @@ function saveSettings() {
     hwSpeed: hwSpeed.value,
     hwBright: hwBright.value,
     hwColor: hwCurrentColorHex,
+    animSpeed: animSpeedSlider ? animSpeedSlider.value : 10,
+    animFps: animFpsSlider ? animFpsSlider.value : 30,
     customColors,
     paintColor,
     customAutoPush: customAutoPush.checked,
@@ -1246,7 +1383,9 @@ function loadSettings() {
     if (s.hwRev20 !== undefined) {
       userLightToggle.checked = s.hwRev20;
     }
-    userLightMode = userLightToggle.checked ? 20 : 16;
+    // Activate the saved revision profile (LED map + UserLight mode)
+    const p = setActiveLayout(userLightToggle.checked ? 'rev2' : 'rev1');
+    userLightMode = p.userLightMode;
     // Update UserLight option label (cosmetic only — value stays '16' to keep select stable)
     const opt = document.getElementById('hw-mode-userlight');
     if (opt) {
@@ -1276,6 +1415,14 @@ function loadSettings() {
     if (s.hwColor) {
       hwCurrentColorHex = s.hwColor;
       if (hwCurrentColorHex !== 'multi') hwColorPicker.value = hwCurrentColorHex;
+    }
+    if (s.animSpeed && animSpeedSlider) {
+      animSpeedSlider.value = s.animSpeed;
+      if (animSpeedVal) animSpeedVal.textContent = (s.animSpeed / 10).toFixed(1);
+    }
+    if (s.animFps && animFpsSlider) {
+      animFpsSlider.value = s.animFps;
+      if (animFpsVal) animFpsVal.textContent = s.animFps;
     }
     
     if (s.customColors && Array.isArray(s.customColors)) {
